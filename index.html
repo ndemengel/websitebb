@@ -4,10 +4,151 @@
     <title>websitebb POC</title>
 </head>
 <body>
-    <h1>websitebb POC</h1>
+<h1>websitebb POC</h1>
 
-    <script>
+<div>
+    <button id="githubAuthButton" hidden>Connect to Github</button>
+</div>
 
-    </script>
+<script>
+    (async () => {
+        const GITHUB_APP_CLIENT_ID = 'Iv1.5a69f79b830da322';
+        const GITHUB_PROVIDER_ID = 'github';
+        const REDIRECTED_FROM_PARAM = 'redirectedFrom';
+        const STORAGE_KEYS = {
+            AUTH_STATE: 'AUTH_STATE',
+            GITHUB_ACCESS_TOKEN: 'GITHUB_ACCESS_TOKEN',
+            GITHUB_REFRESH_TOKEN: 'GITHUB_REFRESH_TOKEN',
+        };
+
+        function buildRedirectUriForProvider(providerId) {
+            const {origin, pathname} = window.location;
+            return `${origin}${pathname}?${REDIRECTED_FROM_PARAM}=${providerId}`;
+        }
+
+        function buildStateForAuth() {
+            const state = btoa(`${Date.now()}${Math.random()}`);
+            sessionStorage.setItem(STORAGE_KEYS.AUTH_STATE, state);
+            return state;
+        }
+
+        function initGithubAuth() {
+            const redirectUri = buildRedirectUriForProvider(GITHUB_PROVIDER_ID);
+            const carriedState = buildStateForAuth();
+
+            const authorizationUrl = 'https://github.com/login/oauth/authorize'
+                + `?client_id=${GITHUB_APP_CLIENT_ID}`
+                + `&redirect_uri=${encodeURIComponent(redirectUri)}`
+                + `&state=${carriedState}`;
+            window.location = authorizationUrl;
+        }
+
+        function showAuthButton(showIt) {
+            const githubAuthButton = document.getElementById('githubAuthButton');
+            githubAuthButton.hidden = !showIt;
+        }
+
+        function setupGithubAuthButton() {
+            const githubAuthButton = document.getElementById('githubAuthButton');
+
+            githubAuthButton.addEventListener('click', (e) => {
+                e.preventDefault();
+                initGithubAuth();
+            });
+        }
+
+        /**
+         * @param proofParamName either 'code' or 'refresh_token'
+         * @param proofParamValue the value corresponding to the above param name
+         * @returns {Promise<boolean>}
+         */
+        async function fetchAccessTokenFromGithub([proofParamName, proofParamValue]) {
+            const redirectUri = buildRedirectUriForProvider(GITHUB_PROVIDER_ID);
+
+            // Github doesn't add the Access-Control-Allow-Origin header on this specific endpoint,
+            // so instead of this:
+            // const accessTokenUrl = 'https://github.com/login/oauth/access_token'
+            //     + `?client_id=${GITHUB_APP_CLIENT_ID}`
+            //     + `&client_secret=${GITHUB_APP_CLIENT_SECRET}`
+            //     + `&${proofParamName}=${proofParamValue}`
+            //     + `&redirect_uri=${encodeURIComponent(redirectUri)}`;
+
+            // ... we'll use a proxy we deployed on Cloudflare:
+            // (In addition, this allows us to not expose the client_secret in our app. Instead,
+            // the proxy takes care of it.)
+            const accessTokenUrl = 'https://websitebb.nicolas-demengel.workers.dev/github-access-token'
+                + `?client_id=${GITHUB_APP_CLIENT_ID}`
+                + `&${proofParamName}=${proofParamValue}`
+                + `&redirect_uri=${encodeURIComponent(redirectUri)}`;
+
+            const response = await fetch(accessTokenUrl, {
+                method: 'POST',
+                headers: new Headers({'Accept': 'application/json'})
+            });
+
+            if (response.status !== 200) {
+                alert(`Authentication to Github failed with message: ${response.statusText}`);
+                return false;
+            }
+
+            const responseBody = await response.json();
+            const {access_token, refresh_token} = responseBody;
+            if (!access_token || !refresh_token) {
+                alert(`Unexpected answer received from Github: ${JSON.stringify(responseBody, null, 2)}`);
+                return false;
+            }
+
+            sessionStorage.setItem(STORAGE_KEYS.GITHUB_ACCESS_TOKEN, access_token);
+            sessionStorage.setItem(STORAGE_KEYS.GITHUB_REFRESH_TOKEN, refresh_token);
+            return true;
+        }
+
+        async function refreshAccessToken() {
+            const refreshToken = sessionStorage.getItem(STORAGE_KEYS.GITHUB_REFRESH_TOKEN);
+            if (refreshToken) {
+                const success = await fetchAccessTokenFromGithub(['refresh_token', refreshToken]);
+                showAuthButton(!success);
+                return success;
+            } else {
+                showAuthButton(true);
+                alert('Error: no refresh token is available to connect to Github. Please connect again to Github.');
+                return false;
+            }
+        }
+
+        async function handleRedirectFromGithubOrAttemptToReconnect() {
+            const queryParams = new URLSearchParams(window.location.search)
+            if (queryParams.get(REDIRECTED_FROM_PARAM) !== GITHUB_PROVIDER_ID) {
+                const refreshToken = sessionStorage.getItem(STORAGE_KEYS.GITHUB_REFRESH_TOKEN);
+                if (refreshToken) {
+                    return await fetchAccessTokenFromGithub(['refresh_token', refreshToken]);
+                }
+                return false;
+            }
+
+            if (!queryParams.get('code')) {
+                console.warn('It looks like current URL has been forged to look like a redirect from Github:'
+                    + ' a `code` parameter was expected in params, but none is present.')
+                return false;
+            }
+
+            const storedState = sessionStorage.getItem(STORAGE_KEYS.AUTH_STATE)
+            if (queryParams.get('state') !== storedState) {
+                console.warn('It looks like current URL has been forged to look like a redirect from Github:'
+                    + ` received state [${queryParams.get('state')}] whereas expected state was [${storedState}].`)
+                return false;
+            }
+
+            return await fetchAccessTokenFromGithub(['code', queryParams.get('code')]);
+        }
+
+        if (await handleRedirectFromGithubOrAttemptToReconnect()) {
+            showAuthButton(false);
+        } else {
+            setupGithubAuthButton();
+            showAuthButton(true);
+        }
+    })();
+</script>
 </body>
 </html>
