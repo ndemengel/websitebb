@@ -9,6 +9,10 @@
 <div>
     <button id="githubAuthButton" hidden>Connect to Github</button>
 </div>
+<div id="repositoryListSection" hidden>
+    User repositories:
+    <ul id="repositoryList"></ul>
+</div>
 
 <script>
     (async () => {
@@ -78,6 +82,7 @@
             // the proxy takes care of it.)
             const accessTokenUrl = 'https://websitebb.nicolas-demengel.workers.dev/github-access-token'
                 + `?client_id=${GITHUB_APP_CLIENT_ID}`
+                + (proofParamName === 'refresh_token' ? `&grant_type=refresh_token` : '')
                 + `&${proofParamName}=${proofParamValue}`
                 + `&redirect_uri=${encodeURIComponent(redirectUri)}`;
 
@@ -85,6 +90,10 @@
                 method: 'POST',
                 headers: new Headers({'Accept': 'application/json'})
             });
+
+            // in case of an error, we better forget about our tokens
+            sessionStorage.removeItem(STORAGE_KEYS.GITHUB_ACCESS_TOKEN);
+            sessionStorage.removeItem(STORAGE_KEYS.GITHUB_REFRESH_TOKEN);
 
             if (response.status !== 200) {
                 alert(`Authentication to Github failed with message: ${response.statusText}`);
@@ -117,12 +126,19 @@
         }
 
         async function handleRedirectFromGithubOrAttemptToReconnect() {
-            const queryParams = new URLSearchParams(window.location.search)
+            const queryParams = new URLSearchParams(window.location.search);
+
             if (queryParams.get(REDIRECTED_FROM_PARAM) !== GITHUB_PROVIDER_ID) {
+                const accessToken = sessionStorage.getItem(STORAGE_KEYS.GITHUB_ACCESS_TOKEN);
                 const refreshToken = sessionStorage.getItem(STORAGE_KEYS.GITHUB_REFRESH_TOKEN);
+                if (accessToken && refreshToken) {
+                    return true;
+                }
+
                 if (refreshToken) {
                     return await fetchAccessTokenFromGithub(['refresh_token', refreshToken]);
                 }
+
                 return false;
             }
 
@@ -142,8 +158,76 @@
             return await fetchAccessTokenFromGithub(['code', queryParams.get('code')]);
         }
 
+        function feedAuthorizationHeaderWithAccessToken(headers) {
+            const accessToken = sessionStorage.getItem(STORAGE_KEYS.GITHUB_ACCESS_TOKEN);
+            headers.set('Authorization', `Bearer ${accessToken}`);
+        }
+
+        /**
+         * [MDN Reference](https://developer.mozilla.org/docs/Web/API/fetch)
+         *
+         * @param {RequestInfo | URL} input
+         * @param {RequestInit?} init
+         * @return Promise<Response>
+         */
+        async function fetchWithAccessTokenRefreshIfNeeded(input, init) {
+            if (!init) {
+                init = {};
+            }
+            if (!init.headers) {
+                init.headers = new Headers();
+            }
+
+            feedAuthorizationHeaderWithAccessToken(init.headers);
+            const response = await fetch(input, init);
+            if (response.status === 401) {
+                console.log('Access token has expired. Refreshing it...');
+                await refreshAccessToken();
+            }
+
+            feedAuthorizationHeaderWithAccessToken(init.headers);
+            return await fetch(input, init);
+        }
+
+        async function getLastUpdatedUserRepositories() {
+            const response = await fetchWithAccessTokenRefreshIfNeeded('https://api.github.com/user/repos?sort=updated&direction=desc', {
+                method: 'GET',
+                headers: new Headers({'Accept': 'application/json'})
+            });
+
+            if (response.status !== 200) {
+                throw new Error(`Could not fetch repositories. Response: ${response.status} ${response.statusText}`);
+            }
+
+            return await response.json();
+        }
+
+        async function displayLastUpdatedUserRepositories() {
+            const repositories = await getLastUpdatedUserRepositories();
+
+            const listItems = repositories.map((repo) => {
+                const listItem = document.createElement('LI');
+                const anchor = document.createElement('A');
+                anchor.href = repo.html_url;
+                anchor.innerText = repo.name
+                listItem.appendChild(anchor);
+                return listItem;
+            });
+
+            document.getElementById('repositoryList').append(...listItems);
+            document.getElementById('repositoryListSection').hidden = false;
+        }
+
         if (await handleRedirectFromGithubOrAttemptToReconnect()) {
             showAuthButton(false);
+
+            const url = new URL(location);
+            url.searchParams.delete('redirectedFrom');
+            url.searchParams.delete('code');
+            url.searchParams.delete('state');
+            history.replaceState(null, 'unused', url);
+
+            await displayLastUpdatedUserRepositories();
         } else {
             setupGithubAuthButton();
             showAuthButton(true);
